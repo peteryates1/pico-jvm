@@ -1,4 +1,5 @@
 /build
 /build.*
+/build-*/
 /test/*.class
 /examples/*/build/*
