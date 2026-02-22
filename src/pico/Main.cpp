@@ -18,6 +18,9 @@
 
 #include "pico/stdlib.h"
 #include "hardware/adc.h"
+#ifdef PICO_W
+#include "pico/cyw43_arch.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -90,6 +93,10 @@ int main( void )
   sleep_ms(3000);
   /* Initialize the ADC hardware */
   adc_init();
+#ifdef PICO_W
+  /* Initialize the CYW43 WiFi chip (needed for onboard LED) */
+  cyw43_arch_init();
+#endif
 
   // Call this before any other Jvm_ functions.
   JVM_Initialize();

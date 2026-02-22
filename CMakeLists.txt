@@ -9,10 +9,15 @@ if (NOT DEFINED TARGET)
     set(TARGET PICO)
 endif()
 
+option(PICO_W "Build for Pico W with WiFi support" OFF)
+
 find_package(Java 1.8 EXACT REQUIRED)
 include(ExternalProject)
 
 if (${TARGET} STREQUAL PICO)
+    if (PICO_W)
+        set(PICO_BOARD pico_w)
+    endif()
     # initialize the SDK based on PICO_SDK_PATH
     # note: this must happen before project()
     include(pico_sdk_import.cmake)
@@ -28,10 +33,11 @@ if (${TARGET} STREQUAL PICO)
 endif()
 
 ExternalProject_Add(jvm_lib SOURCE_DIR ${CMAKE_SOURCE_DIR}/lib
-                            CMAKE_ARGS -DLIBJVM_INSTALL_DIR:STRING=${CMAKE_BINARY_DIR} 
+                            CMAKE_ARGS -DLIBJVM_INSTALL_DIR:STRING=${CMAKE_BINARY_DIR}
                                        -DLIBJVM_VERSION:STRING=${PROJECT_VERSION}
                                        -DCMAKE_BUILD_TYPE:STRING=MinSizeRel
                                        -DTARGET:STRING=${TARGET}
+                                       -DPICO_W:BOOL=${PICO_W}
                                        -DCMAKE_EXPORT_COMPILE_COMMANDS:BOOL=TRUE
                             USES_TERMINAL_BUILD TRUE
                             BUILD_ALWAYS TRUE
@@ -44,6 +50,9 @@ add_dependencies(jvm jvm_lib)
 
 if (${TARGET} STREQUAL PICO)
     set(PJVM_SOURCES src/pico/Main.cpp src/pico/OS.cpp src/pico/Natives.cpp)
+    if (PICO_W)
+        list(APPEND PJVM_SOURCES src/pico/NetNatives.cpp)
+    endif()
 endif()
 if (${TARGET} STREQUAL LINUX)
     set(PJVM_SOURCES src/linux/Main.cpp src/linux/OS.cpp)
@@ -52,7 +61,7 @@ endif()
 add_executable(pjvm ${PJVM_SOURCES})
 
 if (${TARGET} STREQUAL PICO)
-    set(PJVM_INCLUDE_OS_DIRS lib/src/vm/os/pico ${PICO_SDK_PATH}/src/rp2_common/hardware_adc/include)
+    set(PJVM_INCLUDE_OS_DIRS lib/src/vm/os/pico ${PICO_SDK_PATH}/src/rp2_common/hardware_adc/include ${CMAKE_SOURCE_DIR}/src/pico)
 endif()
 if (${TARGET} STREQUAL LINUX)
     set(PJVM_INCLUDE_OS_DIRS lib/src/vm/os/linux)
@@ -71,6 +80,9 @@ target_include_directories(pjvm PRIVATE
 
 if (${TARGET} STREQUAL PICO)
     target_compile_definitions(pjvm PRIVATE PICO)
+    if (PICO_W)
+        target_compile_definitions(pjvm PRIVATE PICO_W)
+    endif()
 endif()
 if (${TARGET} STREQUAL LINUX)
     target_compile_definitions(pjvm PRIVATE PRODUCT)
@@ -83,19 +95,29 @@ target_link_directories(pjvm PRIVATE ${CMAKE_BINARY_DIR})
 
 if (${TARGET} STREQUAL PICO)
     # Add pico_stdlib library which aggregates commonly used features
-    target_link_libraries(pjvm pico_stdlib hardware_adc)
+    target_link_libraries(pjvm pico_stdlib hardware_adc
+                          hardware_pwm hardware_uart hardware_i2c hardware_spi
+                          hardware_timer hardware_watchdog hardware_pio hardware_clocks)
+    if (PICO_W)
+        target_link_libraries(pjvm pico_cyw43_arch_none)
+    endif()
     # create map/bin/hex/uf2 file in addition to ELF.
     pico_add_extra_outputs(pjvm)
     pico_enable_stdio_usb(pjvm 1)
     pico_enable_stdio_uart(pjvm 0)
 endif()
 
-add_custom_command(OUTPUT main.jar.bin 
+add_custom_command(OUTPUT main.jar.bin
                    DEPENDS test/Main.java pjvm
                    COMMAND mkdir ARGS -p ${CMAKE_BINARY_DIR}/main.dir
+                   COMMAND mkdir ARGS -p ${CMAKE_BINARY_DIR}/main.dir.preverify
                    COMMAND javac ARGS -source 1.4 -target 1.4 -d ${CMAKE_BINARY_DIR}/main.dir -bootclasspath ${CMAKE_BINARY_DIR}/classes.jar
                         ${CMAKE_SOURCE_DIR}/test/Main.java
-                   COMMAND cd ARGS ${CMAKE_BINARY_DIR}/main.dir
+                   COMMAND ${BINARY_DIR}/preverify-prefix/src/preverify-build/preverify
+                        ARGS -classpath ${CMAKE_BINARY_DIR}/classes.jar
+                        -d ${CMAKE_BINARY_DIR}/main.dir.preverify
+                        ${CMAKE_BINARY_DIR}/main.dir
+                   COMMAND cd ARGS ${CMAKE_BINARY_DIR}/main.dir.preverify
                    COMMAND jar ARGS -cfM0 ${CMAKE_BINARY_DIR}/main.jar .
                    COMMAND ${CMAKE_SOURCE_DIR}/tools/wrapjar.sh ARGS ${CMAKE_BINARY_DIR}/main.jar ${CMAKE_BINARY_DIR}/main.jar.bin
 )

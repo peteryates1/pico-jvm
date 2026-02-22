@@ -49,7 +49,23 @@ endif()
 if (${TARGET} STREQUAL PICO)
     set(JVM_DEVICE_CLASSES ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/hardware/GPIOPin.java
                            ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/hardware/ADCChannel.java
+                           ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/hardware/PWMChannel.java
+                           ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/hardware/UARTPort.java
+                           ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/hardware/I2CBus.java
+                           ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/hardware/SPIBus.java
+                           ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/hardware/SystemTimer.java
+                           ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/hardware/Watchdog.java
+                           ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/hardware/PIOStateMachine.java
+                           ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/hardware/OnboardLED.java
     )
+    if (PICO_W)
+        list(APPEND JVM_DEVICE_CLASSES
+                           ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/net/WiFi.java
+                           ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/net/TCPSocket.java
+                           ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/net/UDPSocket.java
+                           ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/net/mqtt/MQTTClient.java
+        )
+    endif()
 endif()
 
 set(JVM_CLASSES 
