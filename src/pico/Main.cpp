@@ -18,8 +18,12 @@
 
 #include "pico/stdlib.h"
 #include "hardware/adc.h"
+#include "hardware/watchdog.h"
+#include "hardware/structs/watchdog.h"
 #ifdef PICO_W
 #include "pico/cyw43_arch.h"
+#include "pico/cyw43_driver.h"
+#include "pico/lwip_nosys.h"
 #endif
 
 #include <stdio.h>
@@ -83,19 +87,43 @@ jboolean JVMSPI_CheckExit(void)
   return KNI_TRUE;
 }
 
-int main( void ) 
+int main( void )
 {
   int code = 0;
 
   /* Initialize our stdio */
   stdio_usb_init();
-  /* We have to wait for the USB stack */
-  sleep_ms(3000);
+  /* Wait for USB host to actually connect so we don't lose boot messages */
+  for (int i = 0; i < 100; i++) { /* max 10 seconds */
+    if (stdio_usb_connected()) break;
+    sleep_ms(100);
+  }
+  sleep_ms(500);
+  printf("pjvm: boot OK\n");
+  stdio_flush();
+  sleep_ms(100);
+
   /* Initialize the ADC hardware */
   adc_init();
+  printf("pjvm: ADC OK\n");
+  stdio_flush();
+  sleep_ms(500);
+
 #ifdef PICO_W
-  /* Initialize the CYW43 WiFi chip (needed for onboard LED) */
-  cyw43_arch_init();
+  {
+    extern int cyw43_initialized;
+    printf("pjvm: CYW43 init...\n");
+    stdio_flush();
+    int result = cyw43_arch_init();
+    if (result == 0) {
+      cyw43_initialized = 1;
+      printf("pjvm: CYW43 OK\n");
+    } else {
+      printf("pjvm: CYW43 FAILED (%d)\n", result);
+    }
+    stdio_flush();
+    sleep_ms(100);
+  }
 #endif
 
   // Call this before any other Jvm_ functions.

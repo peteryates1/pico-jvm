@@ -1,0 +1,8 @@
+/**
+ * WiFi configuration - copy to WiFiConfig.java and fill in your credentials.
+ * WiFiConfig.java is in .gitignore so your secrets won't be committed.
+ */
+class WiFiConfig {
+    static final String SSID     = "your_ssid_here";
+    static final String PASSWORD = "your_password_here";
+}

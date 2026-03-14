@@ -11,9 +11,72 @@ Currently the JVM support [CLDC 1.1](https://docs.oracle.com/javame/config/cldc/
 
 ## Features
 
-+ Small footprint - 270KB Flash, 18KB RAM (not including the Java heap)
++ Small footprint - 348KB Flash, 15KB RAM base (not including the Java heap)
++ Supports Raspberry Pi Pico (RP2040) and Pico 2 W (RP2350)
 + Java 1.4 and [CLDC 1.1](https://docs.oracle.com/javame/config/cldc/ref-impl/cldc1.1/jsr139/index.html) API
-+ [Raspberry Pi Pico](https://www.raspberrypi.com/products/raspberry-pi-pico/) Low Level API (See [here](https://github.com/orenskl/pico-jvm/wiki/Examples))
++ Standard `java.io` file I/O with internal flash filesystem (LittleFS) - no extra hardware needed
++ Optional SD card support via SPI with the same `java.io` API
++ WiFi networking on Pico W (TCP, UDP, MQTT)
++ [Raspberry Pi Pico](https://www.raspberrypi.com/products/raspberry-pi-pico/) Hardware API
+
+### Java API
+
+#### Always available
+
+| Package | Classes | Description |
+|---|---|---|
+| `pico.hardware` | `GPIOPin`, `ADCChannel`, `PWMChannel` | Digital/analog I/O |
+| `pico.hardware` | `UARTPort`, `I2CBus`, `SPIBus` | Serial buses |
+| `pico.hardware` | `PIOStateMachine` | Programmable I/O |
+| `pico.hardware` | `SystemTimer`, `Watchdog` | Timing and watchdog |
+| `pico.hardware` | `OnboardLED` | Board LED (CYW43 on Pico W) |
+| `pico.hardware` | `Flash`, `FlashConfig` | Direct flash access and key-value config |
+| `pico.hardware` | `BoardId` | Unique 64-bit board identifier |
+| `pico.hardware` | `TempSensor` | On-chip temperature sensor |
+| `pico.hardware` | `RNG` | Hardware-seeded random number generator |
+| `java.io` | `File`, `FileInputStream`, `FileOutputStream`, `FileNotFoundException` | File I/O on internal flash (LittleFS) |
+
+#### With `-DPICO_W=ON` (Pico W / Pico 2 W)
+
+| Package | Classes | Description |
+|---|---|---|
+| `pico.net` | `WiFi` | WiFi station mode (connect, status, IP) |
+| `pico.net` | `TCPSocket` | Blocking TCP client |
+| `pico.net` | `UDPSocket` | UDP send/receive |
+| `pico.net.mqtt` | `MQTTClient` | MQTT 3.1.1 client (QoS 0/1, backed by lwIP) |
+
+#### With `-DPICO_SD=ON` (SD card via SPI)
+
+| Package | Classes | Description |
+|---|---|---|
+| `pico.hardware` | `SDCard` | SD card mount/unmount |
+| `java.io` | `File`, `FileInputStream`, `FileOutputStream` | File I/O on SD card (paths prefixed with `/sd/`) |
+
+### Filesystem
+
+The JVM includes a built-in filesystem on internal flash using [LittleFS](https://github.com/littlefs-project/littlefs), providing wear-leveled, power-loss resilient file storage with no extra hardware. This gives ~448KB on Pico (2MB flash) or ~2.4MB on Pico 2 (4MB flash).
+
+When SD card support is enabled, files accessed via `/sd/...` paths are routed to the SD card (FAT32 via [FatFs](http://elm-chan.org/fsw/ff/)). All other paths use the internal flash filesystem.
+
+```java
+// Internal flash - always available
+FileOutputStream fos = new FileOutputStream("/data.txt");
+fos.write("Hello!".getBytes());
+fos.close();
+
+// SD card - requires SDCard.mount() first
+SDCard.mount();  // SPI0: MISO=GP16, CS=GP17, SCK=GP18, MOSI=GP19
+FileOutputStream sd = new FileOutputStream("/sd/log.csv");
+```
+
+### Flash layout
+
+```
+0x000000  Firmware (pjvm.elf)         ~348-663KB depending on options
+0x100000  Application (main.jar.bin)
+0x180000  FlashConfig (key=value)     4KB
+0x190000  LittleFS filesystem         to end of flash
+```
 
 ## Installation and setup
 
@@ -108,37 +171,82 @@ This repository includes an `example` directory with a complete [Ant](https://an
 
 ## Building
 
-This project can be built on Ubuntu 22 as the build machine, please install the following packages :
+This project can be built on Ubuntu 22+ as the build machine, please install the following packages :
 
 ```
 sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi build-essential gcc-multilib g++-multilib ninja-build
 ```
 
+You will also need JDK 8 for this, please install it and make sure it is your default Java installation.
 
-You will also need JDK 8 (Yes 8) for this, please install it and make sure it is your default Java installation.
+After cloning the project cd into it and run the the usual CMake commands. Make sure you set `PICO_SDK_PATH` to point to your Pico SDK location.
 
-After cloning the project cd into it and run the the usual CMake commands :
+### Build targets
 
+**Pico (RP2040) - basic:**
 ```
-mkdir build
-cd build
-cmake -DTARGET=PICO -DPICO_SDK_PATH=/home/oren/projects/pico-sdk .. -G Ninja
+mkdir build-pico && cd build-pico
+PICO_SDK_PATH=/opt/pico-sdk cmake -DTARGET=PICO ..
 cmake --build .
 ```
 
-Make sure you set `PICO_SDK_PATH` to point to your Pico SDK location.
+**Pico W (RP2040 with WiFi):**
+```
+mkdir build-picow && cd build-picow
+PICO_SDK_PATH=/opt/pico-sdk cmake -DTARGET=PICO -DPICO_W=ON ..
+cmake --build .
+```
+
+**Pico 2 W (RP2350 with WiFi):**
+```
+mkdir build-pico2w && cd build-pico2w
+PICO_SDK_PATH=/opt/pico-sdk cmake -DTARGET=PICO -DPICO_W=ON -DPICO_BOARD=pico2_w ..
+cmake --build .
+```
+
+**With SD card support** (add to any Pico target):
+```
+PICO_SDK_PATH=/opt/pico-sdk cmake -DTARGET=PICO -DPICO_SD=ON ..
+```
+
+**Linux** (for development/debugging):
+```
+mkdir build-linux && cd build-linux
+cmake -DTARGET=LINUX ..
+cmake --build .
+```
+
+### CMake options
+
+| Option | Default | Description |
+|---|---|---|
+| `TARGET` | `PICO` | Target platform (`PICO` or `LINUX`) |
+| `PICO_W` | `OFF` | Enable WiFi/networking support (Pico W boards) |
+| `PICO_SD` | `OFF` | Enable SD card filesystem via SPI |
+| `PICO_BOARD` | `pico_w` (when PICO_W=ON) | Board type (set to `pico2_w` for RP2350) |
+
+### Binary sizes
+
+| Configuration | Flash | RAM |
+|---|---|---|
+| Pico (base) | 348KB | 15KB |
+| Pico + SD | 386KB | 19KB |
+| Pico 2 W (WiFi) | 663KB | 76KB |
+| Pico 2 W (WiFi + SD) | 696KB | 80KB |
 
 If all goes well you should end up with a `pjvm.uf2` file in your `build` directory. This file can be flashed to the Pi Pico (helper scripts can be found in the `tools` directory). The `pjvm.uf2` file is the Java VM itself and includes the system classes already romized inside it. A Java application is loaded separately into the flash of the Pi Pico at a specific address.
 
-To build the virtual machine for Linux use these commands :
+### SD card wiring (SPI0 defaults)
 
-```
-mkdir build
-cd build
-cmake -DTARGET=LINUX .. -G Ninja
-cmake --build .
-```
+| Pico Pin | GPIO | SD Card |
+|---|---|---|
+| 21 | GP16 | MISO (DO) |
+| 22 | GP17 | CS |
+| 24 | GP18 | SCK (CLK) |
+| 25 | GP19 | MOSI (DI) |
+| 36 | 3V3 | VCC |
+| 38 | GND | GND |
 
-The output of this build is a Linux executable named `pjvm`.
+Custom pins can be passed to `SDCard.mount(spi, sck, mosi, miso, cs)`.
 
 

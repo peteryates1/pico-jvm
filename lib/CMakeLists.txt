@@ -57,6 +57,15 @@ if (${TARGET} STREQUAL PICO)
                            ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/hardware/Watchdog.java
                            ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/hardware/PIOStateMachine.java
                            ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/hardware/OnboardLED.java
+                           ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/hardware/FlashConfig.java
+                           ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/hardware/Flash.java
+                           ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/hardware/BoardId.java
+                           ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/hardware/TempSensor.java
+                           ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/hardware/RNG.java
+                           ${CMAKE_SOURCE_DIR}/src/javaapi/device/java/io/FileNotFoundException.java
+                           ${CMAKE_SOURCE_DIR}/src/javaapi/device/java/io/File.java
+                           ${CMAKE_SOURCE_DIR}/src/javaapi/device/java/io/FileInputStream.java
+                           ${CMAKE_SOURCE_DIR}/src/javaapi/device/java/io/FileOutputStream.java
     )
     if (PICO_W)
         list(APPEND JVM_DEVICE_CLASSES
@@ -64,6 +73,11 @@ if (${TARGET} STREQUAL PICO)
                            ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/net/TCPSocket.java
                            ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/net/UDPSocket.java
                            ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/net/mqtt/MQTTClient.java
+        )
+    endif()
+    if (PICO_SD)
+        list(APPEND JVM_DEVICE_CLASSES
+                           ${CMAKE_SOURCE_DIR}/src/javaapi/device/pico/hardware/SDCard.java
         )
     endif()
 endif()
@@ -179,10 +193,8 @@ add_custom_command(OUTPUT ROMImage.cpp
                    COMMAND mkdir ARGS -p ${CMAKE_BINARY_DIR}/classes
                    COMMAND javac ARGS -source 1.4 -target 1.4 -d ${CMAKE_BINARY_DIR}/classes -bootclasspath ${CMAKE_BINARY_DIR}/classes ${JVM_CLASSES}
                    COMMAND ${PREVERIFY_BINARY_DIR}/preverify ARGS -d ${CMAKE_BINARY_DIR}/classes.preverify ${CMAKE_BINARY_DIR}/classes
-                   COMMAND cd ARGS ${CMAKE_BINARY_DIR}/classes.preverify
-                   COMMAND jar ARGS -cfM0 ${CMAKE_BINARY_DIR}/classes.jar .
-                   COMMAND cd ARGS ${CMAKE_BINARY_DIR}
-                   COMMAND ${ROMGEN_BINARY_DIR}/romgen 
+                   COMMAND jar ARGS -cfM0 ${CMAKE_BINARY_DIR}/classes.jar -C ${CMAKE_BINARY_DIR}/classes.preverify .
+                   COMMAND ${ROMGEN_BINARY_DIR}/romgen
                                     -cp ${CMAKE_BINARY_DIR}/classes.jar
                                     +RewriteROMConstantPool
                                     +EnableAllROMOptimizations
@@ -470,7 +482,11 @@ set(JVM_COMPILE_OPTIONS -Wall -Werror -fno-rtti -fno-exceptions)
 
 if (${TARGET} STREQUAL PICO)
     target_compile_definitions(jvm PRIVATE PICO)
-    target_compile_options(jvm PRIVATE -mcpu=cortex-m0plus -mthumb ${JVM_COMPILE_OPTIONS})
+    if (CMAKE_SYSTEM_PROCESSOR STREQUAL "cortex-m33")
+        target_compile_options(jvm PRIVATE -mcpu=cortex-m33 -mthumb -march=armv8-m.main+fp+dsp ${JVM_COMPILE_OPTIONS})
+    else()
+        target_compile_options(jvm PRIVATE -mcpu=cortex-m0plus -mthumb ${JVM_COMPILE_OPTIONS})
+    endif()
 endif()
 
 if (${TARGET} STREQUAL LINUX)

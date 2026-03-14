@@ -6,12 +6,17 @@
  */
 
 #include <stdio.h>
+#include <string.h>
 
 #include "kni.h"
 #include "sni.h"
 
 #include "hardware/gpio.h"
 #include "hardware/adc.h"
+#include "hardware/flash.h"
+#include "hardware/sync.h"
+#include "pico/unique_id.h"
+#include "pico/rand.h"
 #include "hardware/pwm.h"
 #include "hardware/uart.h"
 #include "hardware/i2c.h"
@@ -26,6 +31,10 @@
 
 #define         ADC_GPIO_PIN_MIN        26
 #define         ADC_GPIO_PIN_MAX        29
+
+#ifdef PICO_W
+int cyw43_initialized = 0;
+#endif
 
 static uart_inst_t *uart_instance(int inst) {
     return inst == 0 ? uart0 : uart1;
@@ -822,7 +831,10 @@ int Java_pico_hardware_PIOStateMachine_pio_1sm_1is_1rx_1empty( void )
 void Java_pico_hardware_OnboardLED_led_1init( void )
 {
 #ifdef PICO_W
-    /* CYW43 already initialized in main() */
+    if (!cyw43_initialized) {
+        cyw43_arch_init();
+        cyw43_initialized = 1;
+    }
 #else
     gpio_init(PICO_DEFAULT_LED_PIN);
     gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
@@ -842,6 +854,244 @@ void Java_pico_hardware_OnboardLED_led_1set( void )
 #else
     gpio_put(PICO_DEFAULT_LED_PIN, state != 0);
 #endif
+}
+
+/* ================================================================
+ * FlashConfig natives
+ * ================================================================ */
+
+/* Config is stored at 1.5MB into flash */
+#define CONFIG_FLASH_OFFSET  0x180000
+
+/**
+ * Read config data from flash
+ *
+ * @param 1st: byte[] buffer
+ * @param 2nd: max length
+ * @return number of bytes read, or negative on error
+ */
+int Java_pico_hardware_FlashConfig_flash_1read_1config( void )
+{
+    int maxLen = KNI_GetParameterAsInt(2);
+    int len = 0;
+
+    KNI_StartHandles(1);
+    KNI_DeclareHandle(bufHandle);
+    KNI_GetParameterAsObject(1, bufHandle);
+
+    uint8_t *buf = (uint8_t *) SNI_GetRawArrayPointer(bufHandle);
+    const uint8_t *flash = (const uint8_t *)(XIP_BASE + CONFIG_FLASH_OFFSET);
+
+    /* Read until maxLen or erased flash (0xFF) or null */
+    while (len < maxLen && flash[len] != 0x00 && flash[len] != 0xFF) {
+        buf[len] = flash[len];
+        len++;
+    }
+
+    KNI_EndHandles();
+    return len;
+}
+
+/* ================================================================
+ * Flash natives (full read/write/erase)
+ * ================================================================ */
+
+/**
+ * Erase a range of flash (must be sector-aligned)
+ *
+ * @param 1st: flash offset
+ * @param 2nd: length in bytes
+ */
+void Java_pico_hardware_Flash_flash_1erase( void )
+{
+    uint32_t offset = (uint32_t)KNI_GetParameterAsInt(1);
+    uint32_t length = (uint32_t)KNI_GetParameterAsInt(2);
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_erase(offset, length);
+    restore_interrupts(ints);
+}
+
+/**
+ * Program (write) data to flash (must be page-aligned)
+ *
+ * @param 1st: flash offset
+ * @param 2nd: byte[] data
+ * @param 3rd: array offset
+ * @param 4th: length
+ */
+void Java_pico_hardware_Flash_flash_1program( void )
+{
+    uint32_t offset = (uint32_t)KNI_GetParameterAsInt(1);
+    int off = KNI_GetParameterAsInt(3);
+    int len = KNI_GetParameterAsInt(4);
+
+    KNI_StartHandles(1);
+    KNI_DeclareHandle(dataHandle);
+    KNI_GetParameterAsObject(2, dataHandle);
+
+    uint8_t *data = (uint8_t *)SNI_GetRawArrayPointer(dataHandle);
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_program(offset, data + off, len);
+    restore_interrupts(ints);
+
+    KNI_EndHandles();
+}
+
+/**
+ * Read data from flash via XIP mapping
+ *
+ * @param 1st: flash offset
+ * @param 2nd: byte[] buffer
+ * @param 3rd: array offset
+ * @param 4th: length
+ */
+void Java_pico_hardware_Flash_flash_1read( void )
+{
+    uint32_t offset = (uint32_t)KNI_GetParameterAsInt(1);
+    int off = KNI_GetParameterAsInt(3);
+    int len = KNI_GetParameterAsInt(4);
+
+    KNI_StartHandles(1);
+    KNI_DeclareHandle(bufHandle);
+    KNI_GetParameterAsObject(2, bufHandle);
+
+    uint8_t *buf = (uint8_t *)SNI_GetRawArrayPointer(bufHandle);
+    const uint8_t *flash = (const uint8_t *)(XIP_BASE + offset);
+    memcpy(buf + off, flash, len);
+
+    KNI_EndHandles();
+}
+
+/* ================================================================
+ * BoardId natives
+ * ================================================================ */
+
+/**
+ * Get the board unique ID as a hex string
+ *
+ * @return 16-character hex string
+ */
+jobject Java_pico_hardware_BoardId_board_1get_1id( void )
+{
+    char id_str[2 * PICO_UNIQUE_BOARD_ID_SIZE_BYTES + 1];
+    pico_get_unique_board_id_string(id_str, sizeof(id_str));
+
+    KNI_StartHandles(1);
+    KNI_DeclareHandle(resultHandle);
+    KNI_NewStringUTF(id_str, resultHandle);
+    KNI_EndHandlesAndReturnObject(resultHandle);
+}
+
+/**
+ * Get the board unique ID as raw bytes
+ *
+ * @param 1st: byte[8] buffer
+ */
+void Java_pico_hardware_BoardId_board_1get_1id_1bytes( void )
+{
+    pico_unique_board_id_t id;
+    pico_get_unique_board_id(&id);
+
+    KNI_StartHandles(1);
+    KNI_DeclareHandle(bufHandle);
+    KNI_GetParameterAsObject(1, bufHandle);
+
+    uint8_t *buf = (uint8_t *)SNI_GetRawArrayPointer(bufHandle);
+    memcpy(buf, id.id, PICO_UNIQUE_BOARD_ID_SIZE_BYTES);
+
+    KNI_EndHandles();
+}
+
+/* ================================================================
+ * TempSensor natives
+ * ================================================================ */
+
+/**
+ * Read the on-chip temperature in centi-degrees Celsius
+ * (e.g. 2705 = 27.05 C)
+ *
+ * Formula: T = 27 - (V - 0.706) / 0.001721
+ * where V = adc_raw * 3.3 / 4096
+ *
+ * In integer math (centi-degrees):
+ * T_centi = 2700 - (adc_raw * 3300 - 2891776) * 100 / 70508
+ */
+int Java_pico_hardware_TempSensor_temp_1read( void )
+{
+    adc_set_temp_sensor_enabled(true);
+
+    /* Save and restore selected input */
+    uint old_input = adc_get_selected_input();
+
+    /* Temperature sensor is input 4 on RP2040/RP2350 QFN-60 */
+    adc_select_input(4);
+    uint16_t raw = adc_read();
+
+    adc_select_input(old_input);
+
+    /* Convert to centi-Celsius using integer math */
+    int numerator = (int)raw * 3300 - 2891776;
+    int temp_centi = 2700 - (numerator * 100) / 70508;
+
+    return temp_centi;
+}
+
+/* ================================================================
+ * RNG natives
+ * ================================================================ */
+
+/**
+ * Get a random 32-bit integer
+ */
+int Java_pico_hardware_RNG_rng_1get_1int( void )
+{
+    return (int)get_rand_32();
+}
+
+/**
+ * Get a random 64-bit long
+ */
+long long Java_pico_hardware_RNG_rng_1get_1long( void )
+{
+    return (long long)get_rand_64();
+}
+
+/**
+ * Fill a byte array with random bytes
+ *
+ * @param 1st: byte[] buffer
+ * @param 2nd: length
+ */
+void Java_pico_hardware_RNG_rng_1get_1bytes( void )
+{
+    int len = KNI_GetParameterAsInt(2);
+
+    KNI_StartHandles(1);
+    KNI_DeclareHandle(bufHandle);
+    KNI_GetParameterAsObject(1, bufHandle);
+
+    uint8_t *buf = (uint8_t *)SNI_GetRawArrayPointer(bufHandle);
+
+    /* Fill 4 bytes at a time */
+    int i = 0;
+    while (i + 4 <= len) {
+        uint32_t r = get_rand_32();
+        buf[i]     = (uint8_t)(r);
+        buf[i + 1] = (uint8_t)(r >> 8);
+        buf[i + 2] = (uint8_t)(r >> 16);
+        buf[i + 3] = (uint8_t)(r >> 24);
+        i += 4;
+    }
+    /* Remaining bytes */
+    if (i < len) {
+        uint32_t r = get_rand_32();
+        while (i < len) {
+            buf[i++] = (uint8_t)r;
+            r >>= 8;
+        }
+    }
+
+    KNI_EndHandles();
 }
 
 } /* extern "C" */

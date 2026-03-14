@@ -8,350 +8,211 @@
 package pico.net.mqtt;
 
 import java.io.IOException;
-import pico.net.TCPSocket;
 
 /**
- * A <code>MQTTClient</code> implements an MQTT 3.1.1 client over TCP.
- * This is a pure Java implementation that uses {@link TCPSocket} for
- * network communication. Supports CONNECT, PUBLISH, SUBSCRIBE, PINGREQ,
- * and DISCONNECT packet types.
+ * A <code>MQTTClient</code> implements an MQTT 3.1.1 client backed by
+ * the lwIP MQTT library. Supports QoS 0 and 1 for publish and subscribe.
  *
- * <p>QoS 0 (at most once) is used for all publish and subscribe operations.</p>
+ * <p>Incoming messages are buffered in a native ring buffer and retrieved
+ * via {@link #receive}.</p>
  */
 public class MQTTClient {
 
-    /* MQTT Control Packet types */
-    private static final int CONNECT     = 1;
-    private static final int CONNACK     = 2;
-    private static final int PUBLISH     = 3;
-    private static final int SUBSCRIBE   = 8;
-    private static final int SUBACK      = 9;
-    private static final int PINGREQ     = 12;
-    private static final int PINGRESP    = 13;
-    private static final int DISCONNECT  = 14;
+    /** QoS 0: At most once delivery */
+    public static final int QOS_0 = 0;
 
-    /* CONNACK return codes */
-    private static final int CONNACK_ACCEPTED = 0;
+    /** QoS 1: At least once delivery */
+    public static final int QOS_1 = 1;
+
+    /** Connection status: accepted */
+    public static final int CONNECT_ACCEPTED = 0;
+
+    /** Connection status: disconnected */
+    public static final int CONNECT_DISCONNECTED = 256;
 
     /**
-     * The underlying TCP connection
+     * Native client handle (index into C-side table)
      */
-    private TCPSocket socket;
+    private int handle = -1;
 
     /**
-     * The next packet identifier for SUBSCRIBE
-     */
-    private int nextPacketId;
-
-    /**
-     * Buffer for building and receiving packets
-     */
-    private byte[] buffer;
-
-    /**
-     * Create a new MQTT client. Call {@link #connect} to establish
-     * a connection to a broker.
+     * Create a new MQTT client instance.
      */
     public MQTTClient() {
-        this.socket = null;
-        this.nextPacketId = 1;
-        this.buffer = new byte[512];
     }
 
     /**
      * Connect to an MQTT broker.
      *
-     * @param broker   The broker hostname or IP address
-     * @param port     The broker port (typically 1883)
-     * @param clientId The MQTT client identifier
-     *
+     * @param broker    the broker hostname or IP address
+     * @param port      the broker port (typically 1883)
+     * @param clientId  the MQTT client identifier
      * @throws IOException if the connection or MQTT handshake fails
      */
     public void connect(String broker, int port, String clientId) throws IOException {
-        this.socket = new TCPSocket(broker, port);
+        connect(broker, port, clientId, null, null);
+    }
 
-        /* Build CONNECT packet */
-        int pos = 0;
-
-        /* Variable header */
-        byte[] varHeader = new byte[10];
-        /* Protocol Name "MQTT" */
-        varHeader[0] = 0;
-        varHeader[1] = 4;
-        varHeader[2] = (byte) 'M';
-        varHeader[3] = (byte) 'Q';
-        varHeader[4] = (byte) 'T';
-        varHeader[5] = (byte) 'T';
-        /* Protocol Level 4 (MQTT 3.1.1) */
-        varHeader[6] = 4;
-        /* Connect Flags: Clean Session */
-        varHeader[7] = 0x02;
-        /* Keep Alive: 60 seconds */
-        varHeader[8] = 0;
-        varHeader[9] = 60;
-
-        /* Payload: Client ID */
-        byte[] clientIdBytes = stringToBytes(clientId);
-        int clientIdLen = clientIdBytes.length;
-
-        int remainingLen = 10 + 2 + clientIdLen;
-
-        /* Fixed header */
-        pos = 0;
-        buffer[pos++] = (byte) (CONNECT << 4);
-        pos = encodeRemainingLength(buffer, pos, remainingLen);
-
-        /* Variable header */
-        arrayCopy(varHeader, 0, buffer, pos, 10);
-        pos += 10;
-
-        /* Client ID (length-prefixed UTF-8 string) */
-        buffer[pos++] = (byte) ((clientIdLen >> 8) & 0xFF);
-        buffer[pos++] = (byte) (clientIdLen & 0xFF);
-        arrayCopy(clientIdBytes, 0, buffer, pos, clientIdLen);
-        pos += clientIdLen;
-
-        socket.send(buffer, 0, pos);
-
-        /* Wait for CONNACK */
-        int received = socket.receive(buffer, 0, buffer.length);
-        if (received < 4) {
-            throw new IOException();
-        }
-        int packetType = (buffer[0] >> 4) & 0x0F;
-        if (packetType != CONNACK) {
-            throw new IOException();
-        }
-        if (buffer[3] != CONNACK_ACCEPTED) {
-            throw new IOException();
+    /**
+     * Connect to an MQTT broker with optional credentials.
+     *
+     * @param broker    the broker hostname or IP address
+     * @param port      the broker port (typically 1883)
+     * @param clientId  the MQTT client identifier
+     * @param user      the username (null if not used)
+     * @param pass      the password (null if not used)
+     * @throws IOException if the connection or MQTT handshake fails
+     */
+    public void connect(String broker, int port, String clientId,
+                        String user, String pass) throws IOException {
+        handle = mqtt_connect(broker, port, clientId, user, pass);
+        if (handle < 0) {
+            throw new IOException("MQTT connect failed");
         }
     }
 
     /**
-     * Publish a message to a topic (QoS 0).
+     * Publish a message to a topic.
      *
-     * @param topic   The topic string
-     * @param payload The message payload
+     * @param topic   the topic string
+     * @param payload the message payload
+     * @param qos     the QoS level (QOS_0 or QOS_1)
+     * @param retain  true to set the retain flag
+     * @throws IOException if the publish fails
+     */
+    public void publish(String topic, byte[] payload, int qos, boolean retain)
+            throws IOException {
+        if (handle < 0) {
+            throw new IOException("Not connected");
+        }
+        int result = mqtt_publish(handle, topic, payload, payload.length,
+                                  qos, retain ? 1 : 0);
+        if (result < 0) {
+            throw new IOException("MQTT publish failed");
+        }
+    }
+
+    /**
+     * Publish a message to a topic with QoS 0 and no retain.
      *
+     * @param topic   the topic string
+     * @param payload the message payload
      * @throws IOException if the publish fails
      */
     public void publish(String topic, byte[] payload) throws IOException {
-        if (socket == null) {
-            throw new IOException();
-        }
-
-        byte[] topicBytes = stringToBytes(topic);
-        int topicLen = topicBytes.length;
-        int payloadLen = payload.length;
-
-        int remainingLen = 2 + topicLen + payloadLen;
-
-        int pos = 0;
-        /* Fixed header: PUBLISH, QoS 0, no retain */
-        buffer[pos++] = (byte) (PUBLISH << 4);
-        pos = encodeRemainingLength(buffer, pos, remainingLen);
-
-        /* Topic (length-prefixed UTF-8 string) */
-        buffer[pos++] = (byte) ((topicLen >> 8) & 0xFF);
-        buffer[pos++] = (byte) (topicLen & 0xFF);
-        arrayCopy(topicBytes, 0, buffer, pos, topicLen);
-        pos += topicLen;
-
-        /* Payload (no packet ID for QoS 0) */
-        arrayCopy(payload, 0, buffer, pos, payloadLen);
-        pos += payloadLen;
-
-        socket.send(buffer, 0, pos);
+        publish(topic, payload, QOS_0, false);
     }
 
     /**
-     * Subscribe to a topic (QoS 0).
+     * Subscribe to a topic.
      *
-     * @param topic The topic filter string
+     * @param topic the topic filter string
+     * @param qos   the maximum QoS level (QOS_0 or QOS_1)
+     * @throws IOException if the subscribe fails
+     */
+    public void subscribe(String topic, int qos) throws IOException {
+        if (handle < 0) {
+            throw new IOException("Not connected");
+        }
+        int result = mqtt_subscribe(handle, topic, qos);
+        if (result < 0) {
+            throw new IOException("MQTT subscribe failed");
+        }
+    }
+
+    /**
+     * Subscribe to a topic with QoS 0.
      *
+     * @param topic the topic filter string
      * @throws IOException if the subscribe fails
      */
     public void subscribe(String topic) throws IOException {
-        if (socket == null) {
-            throw new IOException();
-        }
-
-        byte[] topicBytes = stringToBytes(topic);
-        int topicLen = topicBytes.length;
-
-        int packetId = nextPacketId++;
-        int remainingLen = 2 + 2 + topicLen + 1; /* packetId + topic + QoS */
-
-        int pos = 0;
-        /* Fixed header: SUBSCRIBE, must have bit 1 set */
-        buffer[pos++] = (byte) ((SUBSCRIBE << 4) | 0x02);
-        pos = encodeRemainingLength(buffer, pos, remainingLen);
-
-        /* Packet Identifier */
-        buffer[pos++] = (byte) ((packetId >> 8) & 0xFF);
-        buffer[pos++] = (byte) (packetId & 0xFF);
-
-        /* Topic Filter (length-prefixed UTF-8 string) */
-        buffer[pos++] = (byte) ((topicLen >> 8) & 0xFF);
-        buffer[pos++] = (byte) (topicLen & 0xFF);
-        arrayCopy(topicBytes, 0, buffer, pos, topicLen);
-        pos += topicLen;
-
-        /* Requested QoS: 0 */
-        buffer[pos++] = 0;
-
-        socket.send(buffer, 0, pos);
-
-        /* Wait for SUBACK */
-        int received = socket.receive(buffer, 0, buffer.length);
-        if (received < 5) {
-            throw new IOException();
-        }
-        int packetType = (buffer[0] >> 4) & 0x0F;
-        if (packetType != SUBACK) {
-            throw new IOException();
-        }
+        subscribe(topic, QOS_0);
     }
 
     /**
-     * Receive and parse the next MQTT message. This blocks until
-     * a message is received.
+     * Unsubscribe from a topic.
      *
-     * @param topicBuf  Buffer to store the topic string bytes
-     * @param payloadBuf Buffer to store the payload bytes
-     *
-     * @return an array of two ints: [topicLength, payloadLength],
-     *         or null if a non-PUBLISH packet was received
-     * @throws IOException if the receive fails
+     * @param topic the topic filter string
+     * @throws IOException if the unsubscribe fails
      */
-    public int[] receiveMessage(byte[] topicBuf, byte[] payloadBuf) throws IOException {
-        if (socket == null) {
-            throw new IOException();
+    public void unsubscribe(String topic) throws IOException {
+        if (handle < 0) {
+            throw new IOException("Not connected");
         }
-
-        int received = socket.receive(buffer, 0, buffer.length);
-        if (received < 2) {
-            throw new IOException();
+        int result = mqtt_unsubscribe(handle, topic);
+        if (result < 0) {
+            throw new IOException("MQTT unsubscribe failed");
         }
-
-        int packetType = (buffer[0] >> 4) & 0x0F;
-        if (packetType == PINGREQ) {
-            /* Respond to PINGREQ with PINGRESP */
-            buffer[0] = (byte) (PINGRESP << 4);
-            buffer[1] = 0;
-            socket.send(buffer, 0, 2);
-            return null;
-        }
-
-        if (packetType != PUBLISH) {
-            return null;
-        }
-
-        /* Decode remaining length */
-        int pos = 1;
-        int multiplier = 1;
-        int remainingLen = 0;
-        int encodedByte;
-        do {
-            encodedByte = buffer[pos++] & 0xFF;
-            remainingLen += (encodedByte & 0x7F) * multiplier;
-            multiplier *= 128;
-        } while ((encodedByte & 0x80) != 0);
-
-        /* Topic length */
-        int topicLen = ((buffer[pos] & 0xFF) << 8) | (buffer[pos + 1] & 0xFF);
-        pos += 2;
-
-        /* Copy topic */
-        int copyLen = topicLen;
-        if (copyLen > topicBuf.length) {
-            copyLen = topicBuf.length;
-        }
-        arrayCopy(buffer, pos, topicBuf, 0, copyLen);
-        pos += topicLen;
-
-        /* Payload */
-        int payloadLen = remainingLen - 2 - topicLen;
-        copyLen = payloadLen;
-        if (copyLen > payloadBuf.length) {
-            copyLen = payloadBuf.length;
-        }
-        arrayCopy(buffer, pos, payloadBuf, 0, copyLen);
-
-        int[] result = new int[2];
-        result[0] = topicLen;
-        result[1] = payloadLen;
-        return result;
     }
 
     /**
-     * Send a PINGREQ to the broker to keep the connection alive.
+     * Receive the next incoming MQTT message. This method blocks until
+     * a message is available or the timeout expires.
      *
-     * @throws IOException if the send fails
+     * <p>The topic is written into <code>topicBuf</code> and the payload
+     * into <code>payloadBuf</code>. The returned array contains
+     * <code>[topicLength, payloadLength]</code>, or <code>null</code>
+     * if the timeout expired with no message.</p>
+     *
+     * @param topicBuf   buffer to store the topic bytes
+     * @param payloadBuf buffer to store the payload bytes
+     * @param timeoutMs  maximum time to wait in milliseconds (0 = non-blocking)
+     * @return an array of two ints [topicLength, payloadLength], or null on timeout
+     * @throws IOException if an error occurs or the connection was lost
      */
-    public void ping() throws IOException {
-        if (socket == null) {
-            throw new IOException();
+    public int[] receive(byte[] topicBuf, byte[] payloadBuf, int timeoutMs)
+            throws IOException {
+        if (handle < 0) {
+            throw new IOException("Not connected");
         }
-        buffer[0] = (byte) (PINGREQ << 4);
-        buffer[1] = 0;
-        socket.send(buffer, 0, 2);
+        int result = mqtt_receive(handle, topicBuf, payloadBuf, timeoutMs);
+        if (result < 0) {
+            throw new IOException("MQTT receive failed");
+        }
+        if (result == 0) {
+            return null; /* timeout, no message */
+        }
+        /* result encodes topicLen in high 16 bits, payloadLen in low 16 bits */
+        int[] lengths = new int[2];
+        lengths[0] = (result >> 16) & 0xFFFF;
+        lengths[1] = result & 0xFFFF;
+        return lengths;
     }
 
     /**
-     * Disconnect from the MQTT broker and close the TCP connection.
+     * Check if the client is currently connected to a broker.
+     *
+     * @return true if connected
+     */
+    public boolean isConnected() {
+        if (handle < 0) return false;
+        return mqtt_is_connected(handle) != 0;
+    }
+
+    /**
+     * Disconnect from the MQTT broker and release resources.
      */
     public void disconnect() {
-        if (socket != null) {
-            try {
-                buffer[0] = (byte) (DISCONNECT << 4);
-                buffer[1] = 0;
-                socket.send(buffer, 0, 2);
-            } catch (IOException e) {
-                /* Ignore errors on disconnect */
-            }
-            socket.close();
-            socket = null;
+        if (handle >= 0) {
+            mqtt_disconnect(handle);
+            handle = -1;
         }
     }
 
     /*
-     * Helper methods
+     * Native methods backed by lwIP mqtt_client
      */
-
-    /**
-     * Encode the MQTT remaining length field.
-     */
-    private int encodeRemainingLength(byte[] buf, int pos, int length) {
-        do {
-            int encodedByte = length % 128;
-            length = length / 128;
-            if (length > 0) {
-                encodedByte = encodedByte | 0x80;
-            }
-            buf[pos++] = (byte) encodedByte;
-        } while (length > 0);
-        return pos;
-    }
-
-    /**
-     * Convert a String to a byte array (ASCII/Latin-1).
-     */
-    private byte[] stringToBytes(String s) {
-        byte[] bytes = new byte[s.length()];
-        for (int i = 0; i < s.length(); i++) {
-            bytes[i] = (byte) s.charAt(i);
-        }
-        return bytes;
-    }
-
-    /**
-     * Copy bytes between arrays (like System.arraycopy but safe for CLDC).
-     */
-    private static void arrayCopy(byte[] src, int srcOff, byte[] dst, int dstOff, int len) {
-        for (int i = 0; i < len; i++) {
-            dst[dstOff + i] = src[srcOff + i];
-        }
-    }
-
+    private static native int  mqtt_connect(String broker, int port,
+                                            String clientId,
+                                            String user, String pass);
+    private static native int  mqtt_publish(int handle, String topic,
+                                            byte[] payload, int len,
+                                            int qos, int retain);
+    private static native int  mqtt_subscribe(int handle, String topic, int qos);
+    private static native int  mqtt_unsubscribe(int handle, String topic);
+    private static native int  mqtt_receive(int handle, byte[] topicBuf,
+                                            byte[] payloadBuf, int timeoutMs);
+    private static native int  mqtt_is_connected(int handle);
+    private static native void mqtt_disconnect(int handle);
 }

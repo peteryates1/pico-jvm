@@ -2,4 +2,6 @@
 /build.*
 /build-*/
 /test/*.class
+/test/WiFiConfig.java
+/test/config.txt
 /examples/*/build/*
